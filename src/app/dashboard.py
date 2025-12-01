@@ -17,6 +17,62 @@ from src.config import PROCESSED_DATA_DIR, MODELS_DIR
 from src.features.build_basic_features import build_X_y
 
 # ---------------------------------------------------------------------
+# Feature subsets & helpers for different models
+# ---------------------------------------------------------------------
+
+# Edge model feature set (must match train_rf_edge.py)
+EDGE_FEATURE_COLS = [
+    "packet_count",
+    "byte_count",
+    "flow_duration",
+    "avg_packet_size",
+    "pkt_rate",
+    "byte_rate",
+    "proto",          # encoded as integer inside build_X_y
+    "tcp_flag_syn",
+]
+
+
+def get_model_feature_cols(model_name: str, full_feature_cols):
+    """
+    Decide which feature columns to use for a given model.
+
+    - Edge-style models (e.g. rf_edge_8f) use EDGE_FEATURE_COLS (8 features).
+    - All other models default to the full feature set returned by build_X_y().
+    """
+    # You can refine this condition later if you add more edge-style models.
+    if "edge" in model_name.lower():
+        return EDGE_FEATURE_COLS
+
+    # Default: use the full feature set
+    return full_feature_cols
+
+
+def get_model_scaler(model_name: str, scalers_dict):
+    """
+    Try to find a matching scaler object for the given model.
+
+    Convention:
+      rf_edge_8f        -> rf_edge_8f_scaler.joblib
+      some_model_name   -> some_model_name_scaler.joblib
+
+    If no exact match is found, we fall back to the first scaler whose
+    key starts with the model name. If none is found, return None.
+    """
+    # Exact key with "_scaler" suffix
+    key_exact = f"{model_name}_scaler"
+    if key_exact in scalers_dict:
+        return scalers_dict[key_exact]
+
+    # Fallback: any scaler whose name starts with the model name
+    for k, v in scalers_dict.items():
+        if k.startswith(model_name):
+            return v
+
+    # No scaler found – caller should handle None
+    return None
+
+# ---------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------
 PROCESSED_CSV = PROCESSED_DATA_DIR / "merged_placeholder.csv"
@@ -96,6 +152,33 @@ def load_all_models():
             continue
 
     return models
+
+@st.cache_resource(show_spinner=False)
+def load_all_scalers():
+    """
+    Load all scaler-like .joblib objects from MODELS_DIR.
+
+    We treat anything that has `.transform` but does NOT have `.predict`
+    as a scaler (e.g. StandardScaler, MinMaxScaler).
+
+    Examples it will pick up:
+      - rf_edge_8f_scaler.joblib
+      - autoencoder_normal_scaler.joblib
+    """
+    scalers = {}
+    for p in MODELS_DIR.glob("*.joblib"):
+        obj = None
+        try:
+            obj = joblib.load(p)
+        except Exception:
+            # unreadable / incompatible object – skip
+            continue
+
+        # Heuristic: scaler-like (has transform, no predict)
+        if hasattr(obj, "transform") and not hasattr(obj, "predict"):
+            scalers[p.stem] = obj
+
+    return scalers
 
 
 def explain_models():
@@ -292,6 +375,8 @@ df = load_processed()
 all_metrics = load_metrics()
 feature_cols = get_feature_columns()
 models = load_all_models()
+scalers = load_all_scalers()
+FULL_FEATURE_COLS = feature_cols
 
 
 # ---------------------------------------------------------------------
@@ -709,10 +794,54 @@ with tab_live:
             if mode == "Manual single flow":
                 st.markdown(
                     """
-Use this to **play with random feature values** and see if the model flags it as normal or attack.  
-Values are in the *processed feature space* (after our standardisation step).
-"""
+            Use this to **play with random feature values** and see if the model flags it as normal or attack.  
+            Values are in the **raw feature space** (counts / rates); the app internally applies the
+            same preprocessing (encoding + scaling) that was used during training.
+            """
                 )
+
+                # ------------------------------------------------------------------
+                # RANDOM FLOW LOADERS (NORMAL / ATTACK)
+                # ------------------------------------------------------------------
+                b1, b2 = st.columns(2)
+
+                with b1:
+                    if st.button("🎲 Load random NORMAL flow from dataset"):
+                        df_normals = df[df["label"] == 0]
+                        if not df_normals.empty:
+                            row = df_normals.sample(1).iloc[0]
+                            st.session_state["manual_packet_count"] = float(row["packet_count"])
+                            st.session_state["manual_byte_count"] = float(row["byte_count"])
+                            st.session_state["manual_flow_duration"] = float(row["flow_duration"])
+                            st.session_state["manual_avg_packet_size"] = float(row["avg_packet_size"])
+                            st.session_state["manual_pkt_rate"] = float(row["pkt_rate"])
+                            st.session_state["manual_byte_rate"] = float(row["byte_rate"])
+                            st.session_state["manual_proto"] = str(row["proto"])
+                            st.session_state["manual_tcp_flag_syn"] = bool(row["tcp_flag_syn"])
+                            st.session_state["manual_tcp_flag_ack"] = bool(row["tcp_flag_ack"])
+                            st.session_state["manual_dataset_source"] = str(row["dataset_source"])
+                            st.session_state["manual_true_label"] = 0
+
+                with b2:
+                    if st.button("⚠️ Load random ATTACK flow from dataset"):
+                        df_attacks = df[df["label"] == 1]
+                        if not df_attacks.empty:
+                            row = df_attacks.sample(1).iloc[0]
+                            st.session_state["manual_packet_count"] = float(row["packet_count"])
+                            st.session_state["manual_byte_count"] = float(row["byte_count"])
+                            st.session_state["manual_flow_duration"] = float(row["flow_duration"])
+                            st.session_state["manual_avg_packet_size"] = float(row["avg_packet_size"])
+                            st.session_state["manual_pkt_rate"] = float(row["pkt_rate"])
+                            st.session_state["manual_byte_rate"] = float(row["byte_rate"])
+                            st.session_state["manual_proto"] = str(row["proto"])
+                            st.session_state["manual_tcp_flag_syn"] = bool(row["tcp_flag_syn"])
+                            st.session_state["manual_tcp_flag_ack"] = bool(row["tcp_flag_ack"])
+                            st.session_state["manual_dataset_source"] = str(row["dataset_source"])
+                            st.session_state["manual_true_label"] = 1
+
+                # ------------------------------------------------------------------
+                # MANUAL FORM (WIRED TO SESSION STATE)
+                # ------------------------------------------------------------------
                 with st.form("manual_flow_form"):
                     c1, c2, c3 = st.columns(3)
                     c4, c5, c6 = st.columns(3)
@@ -721,53 +850,85 @@ Values are in the *processed feature space* (after our standardisation step).
                     packet_count = c1.number_input(
                         "packet_count",
                         min_value=0.0,
-                        value=float(df["packet_count"].median()),
+                        value=float(st.session_state.get("manual_packet_count", df["packet_count"].median())),
+                        key="manual_packet_count",
+                        step=0.000001,
+                        format="%.6f",
                     )
                     byte_count = c2.number_input(
                         "byte_count",
                         min_value=0.0,
-                        value=float(df["byte_count"].median()),
+                        value=float(st.session_state.get("manual_byte_count", df["byte_count"].median())),
+                        key="manual_byte_count",
+                        step=0.000001,
+                        format="%.6f",
                     )
                     flow_duration = c3.number_input(
                         "flow_duration",
                         min_value=0.0,
-                        value=float(df["flow_duration"].median()),
+                        value=float(st.session_state.get("manual_flow_duration", df["flow_duration"].median())),
+                        key="manual_flow_duration",
+                        step=0.000001,
+                        format="%.6f",
                     )
 
                     avg_packet_size = c4.number_input(
                         "avg_packet_size",
                         min_value=0.0,
-                        value=float(df["avg_packet_size"].median()),
+                        value=float(st.session_state.get("manual_avg_packet_size", df["avg_packet_size"].median())),
+                        key="manual_avg_packet_size",
+                        step=0.000001,
+                        format="%.6f",
                     )
                     pkt_rate = c5.number_input(
                         "pkt_rate",
                         min_value=0.0,
-                        value=float(df["pkt_rate"].median()),
+                        value=float(st.session_state.get("manual_pkt_rate", df["pkt_rate"].median())),
+                        key="manual_pkt_rate",
+                        step=0.000001,
+                        format="%.6f",
                     )
                     byte_rate = c6.number_input(
                         "byte_rate",
                         min_value=0.0,
-                        value=float(df["byte_rate"].median()),
+                        value=float(st.session_state.get("manual_byte_rate", df["byte_rate"].median())),
+                        key="manual_byte_rate",
+                        step=0.000001,
+                        format="%.6f",
                     )
 
                     proto = c7.selectbox(
                         "proto",
                         options=proto_options,
-                        index=proto_options.index("tcp") if "tcp" in proto_options else 0,
+                        index=proto_options.index(st.session_state.get("manual_proto", "tcp"))
+                        if st.session_state.get("manual_proto", "tcp") in proto_options else 0,
+                        key="manual_proto",
                     )
-                    tcp_flag_syn = c8.checkbox("tcp_flag_syn", value=False)
-                    tcp_flag_ack = c9.checkbox("tcp_flag_ack", value=False)
+                    tcp_flag_syn = c8.checkbox(
+                        "tcp_flag_syn",
+                        value=bool(st.session_state.get("manual_tcp_flag_syn", False)),
+                        key="manual_tcp_flag_syn",
+                    )
+                    tcp_flag_ack = c9.checkbox(
+                        "tcp_flag_ack",
+                        value=bool(st.session_state.get("manual_tcp_flag_ack", False)),
+                        key="manual_tcp_flag_ack",
+                    )
 
                     dataset_source = st.selectbox(
                         "dataset_source (which dataset style does this look like?)",
                         options=ds_options,
-                        index=ds_options.index("bot_iot") if "bot_iot" in ds_options else 0,
+                        index=ds_options.index(st.session_state.get("manual_dataset_source", "bot_iot"))
+                        if st.session_state.get("manual_dataset_source", "bot_iot") in ds_options else 0,
+                        key="manual_dataset_source",
                     )
 
                     submitted = st.form_submit_button("🔍 Detect")
 
+                # ------------------------------------------------------------------
+                # PREDICTION BLOCK
+                # ------------------------------------------------------------------
                 if submitted:
-                    # Build a single-row DataFrame in processed-schema format
                     manual_row = {
                         "packet_count": packet_count,
                         "byte_count": byte_count,
@@ -778,22 +939,35 @@ Values are in the *processed feature space* (after our standardisation step).
                         "proto": str(proto),
                         "tcp_flag_syn": int(tcp_flag_syn),
                         "tcp_flag_ack": int(tcp_flag_ack),
-                        "label": 0,  # dummy, required by build_X_y
+                        "label": 0,
                         "dataset_source": dataset_source,
                     }
+
                     df_manual = pd.DataFrame([manual_row])
 
-                    # Convert to feature vector using same pipeline as training
+                    # Build X using training pipeline
                     X_manual, _ = build_X_y(df_manual)
-                    X_manual = X_manual.reindex(columns=template_cols, fill_value=0)
 
-                    pred = int(model.predict(X_manual)[0])
+                    # 1) Select feature subset
+                    model_feature_cols = get_model_feature_cols(model_choice, FULL_FEATURE_COLS)
+                    X_manual = X_manual.reindex(columns=model_feature_cols, fill_value=0)
+
+                    # 2) Apply associated scaler
+                    scaler = get_model_scaler(model_choice, scalers)
+                    if scaler is not None:
+                        X_in = scaler.transform(X_manual)
+                    else:
+                        X_in = X_manual
+
+                    # 3) Predict
+                    pred = int(model.predict(X_in)[0])
                     proba = None
                     try:
-                        proba = float(model.predict_proba(X_manual)[0][1])
+                        proba = float(model.predict_proba(X_in)[0][1])
                     except Exception:
-                        pass
+                        proba = None
 
+                    # Display prediction
                     if pred == 1:
                         st.error("🔴 **Model prediction: ATTACK (label=1)**")
                     else:
@@ -802,8 +976,13 @@ Values are in the *processed feature space* (after our standardisation step).
                     if proba is not None:
                         st.write(f"Estimated attack probability: **{proba:.4f}**")
 
+                    # Optional: show ground truth if flow was sampled
+                    if "manual_true_label" in st.session_state:
+                        st.info(f"Ground truth of sampled flow: **{st.session_state['manual_true_label']}**")
+
                     st.markdown("**Feature vector used:**")
                     st.json(manual_row)
+
 
             # ---------- CSV batch mode ----------
             else:
@@ -868,12 +1047,24 @@ Optional:
                                 df_new["dataset_source"] = default_ds
 
                             if st.button("🔍 Run batch detection"):
+                                # Build features using same pipeline
                                 X_new, _ = build_X_y(df_new)
-                                X_new = X_new.reindex(columns=template_cols, fill_value=0)
 
-                                preds = model.predict(X_new)
+                                # 1) Select correct feature subset for this model
+                                model_feature_cols = get_model_feature_cols(model_choice, FULL_FEATURE_COLS)
+                                X_new = X_new.reindex(columns=model_feature_cols, fill_value=0)
+
+                                # 2) Apply scaler if available
+                                scaler = get_model_scaler(model_choice, scalers)
+                                if scaler is not None:
+                                    X_in = scaler.transform(X_new)
+                                else:
+                                    X_in = X_new
+
+                                # 3) Predict
+                                preds = model.predict(X_in)
                                 try:
-                                    probas = model.predict_proba(X_new)[:, 1]
+                                    probas = model.predict_proba(X_in)[:, 1]
                                 except Exception:
                                     probas = None
 

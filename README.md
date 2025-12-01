@@ -12,6 +12,8 @@ This project implements a binary **Intrusion Detection System (IDS)** for IoT en
 > Course: CIS-600 – IoT Security & Privacy  
 > Author: Aakanksh Singh
 
+After installing all the dependencies we can run the app by using : uv run streamlit run src/app/dashboard.py
+
 ---
 
 ## Project Structure
